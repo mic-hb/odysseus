@@ -12,6 +12,11 @@
 // arbitrary code paths), so the badge label is "best effort" — it shows
 // either the explicit per-chat value (if any) or falls back to "auto".
 
+// Same-origin as the page — no base path prefix needed (e.g. when the
+// app is reverse-proxied at ``/odysseus``). Matches the convention used
+// by the other self-contained modules (calendar.js, emailInbox.js, …).
+const API_BASE = window.location.origin;
+
 const _POPOVER_ID = 'chat-maxtokens-popover';
 let _currentSessionId = null;
 let _currentModelId = null;
@@ -90,7 +95,7 @@ async function _save(value) {
   }
 }
 
-function _openPopover() {
+async function _openPopover() {
   if (!_currentSessionId) return;
   _closePopover();
   const btn = _$('chat-maxtokens-btn');
