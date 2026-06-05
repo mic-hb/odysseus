@@ -6,6 +6,10 @@ httpx
 pydantic>=2.0
 pydantic-settings>=2.0
 SQLAlchemy
+# PostgreSQL driver. SQLAlchemy 2.x + psycopg 3 is the supported combo;
+# psycopg[binary] ships pre-built wheels so the slim image doesn't need
+# libpq dev headers.
+psycopg[binary]
 pypdf
 beautifulsoup4
 charset-normalizer

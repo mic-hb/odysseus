@@ -34,7 +34,7 @@ services:
       - SEARXNG_INSTANCE=http://searxng:8080
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8000
-      - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/app.db}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://odysseus:odysseus@postgres:5432/odysseus}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
       - LOCALHOST_BYPASS=${LOCALHOST_BYPASS:-false}
       - ODYSSEUS_ADMIN_USER=${ODYSSEUS_ADMIN_USER:-admin}
@@ -66,10 +66,28 @@ services:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     depends_on:
+      postgres:
+        condition: service_healthy
       searxng:
         condition: service_healthy
       chromadb:
         condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-odysseus}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-odysseus}
+      - POSTGRES_DB=${POSTGRES_DB:-odysseus}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-odysseus} -d ${POSTGRES_DB:-odysseus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     restart: unless-stopped
 
   chromadb:
@@ -147,3 +165,4 @@ volumes:
   searxng-data:
   chromadb-data:
   ntfy-cache:
+  postgres-data:
