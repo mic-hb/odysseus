@@ -1607,31 +1607,32 @@ def _migrate_add_max_tokens_columns():
     ``0`` is a *valid* explicit value meaning "no limit" (the provider
     decides). This matches the resolution in
     :func:`src.endpoint_resolver.resolve_max_tokens`.
-    Idempotent: each ALTER is guarded by PRAGMA table_info.
+
+    Cross-dialect: uses SQLAlchemy's ``inspect()`` for column lookup and
+    the engine's connection for ``ALTER TABLE`` so the same statement
+    works on SQLite (where the existing migrations are written
+    directly against ``sqlite3``) and on PostgreSQL (the production
+    deployment, which previously got silently skipped — see issue with
+    ``sqlite:///`` prefix on a non-SQLite URL).
     """
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        return
     try:
-        conn = sqlite3.connect(db_path)
+        with engine.begin() as conn:
+            insp = inspect(conn)
 
-        cur = conn.execute("PRAGMA table_info(sessions)")
-        sess_cols = {row[1] for row in cur.fetchall()}
-        if sess_cols and "max_tokens" not in sess_cols:
-            conn.execute("ALTER TABLE sessions ADD COLUMN max_tokens INTEGER")
+            if insp.has_table("sessions"):
+                sess_cols = {c["name"] for c in insp.get_columns("sessions")}
+                if "max_tokens" not in sess_cols:
+                    conn.execute(text("ALTER TABLE sessions ADD COLUMN max_tokens INTEGER"))
 
-        cur = conn.execute("PRAGMA table_info(model_endpoints)")
-        ep_cols = {row[1] for row in cur.fetchall()}
-        if ep_cols:
-            if "max_tokens" not in ep_cols:
-                conn.execute("ALTER TABLE model_endpoints ADD COLUMN max_tokens INTEGER")
-            if "model_max_tokens" not in ep_cols:
-                conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_max_tokens TEXT")
-
-        conn.commit()
-        conn.close()
-        logging.getLogger(__name__).info("Migrated: max_tokens columns on sessions + model_endpoints")
+            if insp.has_table("model_endpoints"):
+                ep_cols = {c["name"] for c in insp.get_columns("model_endpoints")}
+                if "max_tokens" not in ep_cols:
+                    conn.execute(text("ALTER TABLE model_endpoints ADD COLUMN max_tokens INTEGER"))
+                if "model_max_tokens" not in ep_cols:
+                    conn.execute(text("ALTER TABLE model_endpoints ADD COLUMN model_max_tokens TEXT"))
+        logging.getLogger(__name__).info(
+            "Migrated: max_tokens columns on sessions + model_endpoints"
+        )
     except Exception as e:
         logging.getLogger(__name__).warning(f"max_tokens columns migration failed: {e}")
 
