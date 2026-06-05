@@ -74,7 +74,17 @@ function _onKey(e) {
 }
 
 async function _save(value) {
-  if (!_currentSessionId) return;
+  if (!_currentSessionId) {
+    // No active session (welcome screen, or the model picker hasn't
+    // reported a session yet). Surface a friendly error in the popover
+    // status line instead of silently failing on a 404.
+    const msg = document.querySelector(`#${_POPOVER_ID} .chat-maxtokens-msg`);
+    if (msg) {
+      msg.textContent = 'Open or start a chat first to set a per-chat cap.';
+      msg.style.color = 'var(--red)';
+    }
+    return;
+  }
   try {
     const r = await fetch(`${API_BASE}/api/session/${_currentSessionId}/max_tokens`, {
       method: 'PATCH',
@@ -96,19 +106,31 @@ async function _save(value) {
 }
 
 async function _openPopover() {
-  if (!_currentSessionId) return;
+  // The session ID is only needed when SAVING — it's not required to
+  // open the popover. Letting the popover open even before the
+  // model-picker has reported the active session (which is the case
+  // on first paint and on the welcome screen) means the badge works
+  // as soon as the page is interactive. If the user saves before a
+  // session exists, ``_save`` falls back to a friendlier "open a chat
+  // first" message instead of firing a 404 to /api/session/null/...
   _closePopover();
   const btn = _$('chat-maxtokens-btn');
   if (!btn) return;
   const pop = document.createElement('div');
   pop.id = _POPOVER_ID;
   pop.className = 'chat-maxtokens-popover';
-  pop.style.cssText = 'position:absolute;z-index:1000;background:var(--bg);border:1px solid color-mix(in srgb, var(--fg) 18%, transparent);border-radius:8px;padding:12px;box-shadow:0 8px 24px rgba(0,0,0,0.18);min-width:240px;font-size:12px;';
+  // Position via fixed (so it scrolls with the page correctly on mobile
+  // keyboards) and a 6px gutter. We measure after insert and clamp so
+  // the popover never spills off either edge of the viewport — earlier
+  // this used `right: (innerWidth - rect.right)`, which on a 390px phone
+  // placed the popover's right edge at the badge's right edge and then
+  // let the left edge overflow the screen (e.g. x = -136 in tests).
+  pop.style.cssText = 'position:fixed;z-index:1000;background:var(--bg);border:1px solid color-mix(in srgb, var(--fg) 18%, transparent);border-radius:8px;padding:12px;box-shadow:0 8px 24px rgba(0,0,0,0.18);min-width:220px;max-width:calc(100vw - 16px);box-sizing:border-box;font-size:12px;';
   pop.innerHTML = `
     <div style="font-weight:600;margin-bottom:6px;">Max output tokens for this chat</div>
     <div style="opacity:0.6;font-size:11px;margin-bottom:8px;">0 = no limit (provider decides). Leave blank to inherit the per-model / per-endpoint / global default.</div>
     <div style="display:flex;gap:6px;align-items:center;">
-      <input type="number" id="chat-maxtokens-input" min="0" max="131072" step="256" placeholder="auto (inherit)" style="flex:1;padding:5px 8px;background:var(--bg);color:var(--fg);border:1px solid color-mix(in srgb, var(--fg) 18%, transparent);border-radius:4px;font-size:12px;">
+      <input type="number" id="chat-maxtokens-input" min="0" max="131072" step="256" placeholder="auto (inherit)" style="flex:1;min-width:0;padding:5px 8px;background:var(--bg);color:var(--fg);border:1px solid color-mix(in srgb, var(--fg) 18%, transparent);border-radius:4px;font-size:12px;">
       <button type="button" id="chat-maxtokens-save" class="admin-btn-sm">Save</button>
     </div>
     <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap;">
@@ -121,12 +143,47 @@ async function _openPopover() {
       <button type="button" class="admin-btn-sm" data-mt-quick="131072">128K</button>
       <button type="button" class="admin-btn-sm" data-mt-quick="">Inherit</button>
     </div>
+    <div class="chat-maxtokens-msg" style="font-size:11px;margin-top:6px;min-height:1em;opacity:0.7;"></div>
   `;
-  // Position next to the badge button.
-  const rect = btn.getBoundingClientRect();
-  pop.style.top = (rect.bottom + 6) + 'px';
-  pop.style.right = (window.innerWidth - rect.right) + 'px';
   document.body.appendChild(pop);
+
+  // Position the popover relative to the button. Anchor: right edge
+  // of the popover aligns with the right edge of the button by default.
+  // Then clamp: if the popover would overflow the left edge of the
+  // viewport (the common mobile case — 240px popover on a 390px screen
+  // anchored to a button near the right edge), pin the popover's LEFT
+  // edge at 8px instead. Also clamp vertically: if the popover would
+  // overflow the bottom (mobile keyboard up, tiny phones), flip it
+  // above the button.
+  const rect = btn.getBoundingClientRect();
+  const popRect = pop.getBoundingClientRect();
+  const margin = 6;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const pad = 8;
+
+  // Desired right-edge x of the popover (same as button's right edge).
+  let popRightX = rect.right;
+  // If anchoring at that right edge pushes the left edge off-screen,
+  // clamp the left edge to ``pad`` and let the right edge overflow
+  // by the same amount (CSS will still render it on-screen because
+  // we set ``left`` explicitly below).
+  if (popRightX - popRect.width < pad) {
+    // Switch to left-anchored positioning. The popover's left edge
+    // sits at ``pad`` from the viewport's left edge.
+    pop.style.left = pad + 'px';
+    pop.style.right = 'auto';
+  } else {
+    pop.style.right = (vw - popRightX) + 'px';
+    pop.style.left = 'auto';
+  }
+
+  // Vertical: try below the button, flip above if it overflows.
+  let top = rect.bottom + margin;
+  if (top + popRect.height > vh) {
+    top = Math.max(pad, rect.top - margin - popRect.height);
+  }
+  pop.style.top = top + 'px';
   setTimeout(() => {
     document.addEventListener('click', _onDocClick, true);
     document.addEventListener('keydown', _onKey, true);
