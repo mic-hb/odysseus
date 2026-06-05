@@ -12,7 +12,7 @@ from core.models import ChatMessage
 from core.database import SessionLocal
 from core.database import Session as DBSession, ModelEndpoint
 from src.llm_core import normalize_model_id
-from src.endpoint_resolver import normalize_base
+from src.endpoint_resolver import normalize_base, resolve_max_tokens_with_preset
 from src.context_compactor import maybe_compact, trim_for_context
 from src.auth_helpers import get_current_user
 from src.prompt_security import untrusted_context_message
@@ -269,6 +269,39 @@ def extract_preset(chat_handler, preset_id) -> PresetInfo:
         max_tokens=max_tokens,
         system_prompt=system_prompt,
         character_name=char_name,
+    )
+
+
+def resolve_effective_max_tokens(sess, preset_max_tokens: Optional[int]) -> int:
+    """Resolve the effective output cap for a chat call against ``sess``.
+
+    Tier-0 is the active persona (``preset_max_tokens``). When unset
+    (None), the call falls through to the 4-tier chain in
+    :func:`src.endpoint_resolver.resolve_max_tokens`:
+    session → per-model → per-endpoint → global → provider default.
+
+    The endpoint row is looked up from the DB once per call by
+    ``base_url``. A failure to read the DB never breaks the chat — it
+    just skips the per-endpoint tiers and uses the provider default.
+    """
+    ep_row = None
+    try:
+        db = SessionLocal()
+        try:
+            ep_row = db.query(ModelEndpoint).filter(
+                ModelEndpoint.base_url == normalize_base(sess.endpoint_url or "")
+            ).first()
+        finally:
+            db.close()
+    except Exception:
+        ep_row = None
+    return resolve_max_tokens_with_preset(
+        preset_max_tokens=preset_max_tokens,
+        session=sess,
+        model=getattr(sess, "model", None),
+        endpoint=ep_row,
+        endpoint_base_url=sess.endpoint_url,
+        owner=getattr(sess, "owner", None),
     )
 
 

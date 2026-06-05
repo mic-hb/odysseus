@@ -8,7 +8,7 @@ import json
 import logging
 import socket
 import subprocess
-from typing import Optional, Tuple, Dict
+from typing import Any, Optional, Tuple, Dict
 from urllib.parse import urlparse, urlunparse
 
 from core.database import SessionLocal, ModelEndpoint
@@ -401,3 +401,164 @@ def _resolve_fallback_candidates(setting_key: str, owner: Optional[str] = None) 
         if resolved:
             out.append(resolved)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Max-tokens resolution chain
+# ---------------------------------------------------------------------------
+#
+# 4-tier precedence, highest to lowest. A value of ``None`` at any tier means
+# "not configured for this tier, fall through". A value of ``0`` is an
+# EXPLICIT, valid value meaning "no limit" (sent to the provider as 0). The
+# provider decides what 0 means — Anthropic rejects it, OpenAI interprets it
+# as the model default, MiniMax mirrors OpenAI. This is intentional: the
+# user opted into "no limit" by setting 0.
+#
+#   1. session.max_tokens        — per-chat override (DB column)
+#   2. endpoint.model_max_tokens[model]  — per-model override (JSON map)
+#   3. endpoint.max_tokens       — per-endpoint default (DB column)
+#   4. global user setting        — Settings → AI → Default max output tokens
+#   5. provider default           — 4096 for Anthropic / Anthropic-compatible;
+#                                   0 for everything else (let the model
+#                                   decide its own cap)
+#
+# ``preset_max_tokens`` (from the active persona) is a tier-0 override that
+# is applied by the caller BEFORE invoking this function — the preset is a
+# chat-level setting just like the session, and conflating them keeps the
+# precedence simple.
+
+# Provider default for Anthropic-style APIs. Matches the Anthropic API's
+# own default for the Messages endpoint, so even an unconfigured user
+# gets a sane number of tokens on a fresh install.
+_ANTHROPIC_PROVIDER_DEFAULT = 4096
+
+
+def _parse_model_max_tokens(raw) -> Dict[str, int]:
+    """Parse the ``model_max_tokens`` JSON column on ``ModelEndpoint``.
+
+    Returns an empty dict on any failure (malformed JSON, non-dict, None).
+    Always returns a fresh dict so callers can mutate freely.
+    """
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return {}
+        if isinstance(data, dict):
+            return {str(k): int(v) for k, v in data.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    return {}
+
+
+def resolve_max_tokens(
+    *,
+    session: Optional[Any] = None,
+    model: Optional[str] = None,
+    endpoint: Optional[Any] = None,
+    endpoint_base_url: Optional[str] = None,
+    owner: Optional[str] = None,
+) -> int:
+    """Resolve the output cap for an LLM call.
+
+    Walks the 4-tier chain (session → per-model → per-endpoint → global),
+    returning the first explicitly-configured value (including ``0``). If
+    nothing is configured anywhere, returns the provider default
+    (``_ANTHROPIC_PROVIDER_DEFAULT`` for Anthropic-compatible URLs,
+    ``0`` for everything else).
+
+    Args:
+        session: An object with a ``max_tokens`` attribute (the ``Session``
+            DB row, the in-memory session, or anything that quacks like
+            one). ``None`` or missing ``max_tokens`` is treated as "not
+            configured at this tier".
+        model: Model id used for the per-model override lookup. ``None``
+            skips the per-model tier.
+        endpoint: A ``ModelEndpoint`` row (or anything with ``max_tokens`` /
+            ``model_max_tokens`` attributes). ``None`` skips the per-endpoint
+            tiers.
+        endpoint_base_url: Used to detect the Anthropic provider for the
+            fallback default. If both ``endpoint`` and ``endpoint_base_url``
+            are provided, ``endpoint.base_url`` wins; this argument is the
+            convenience path for callers that already have the URL but not
+            the row.
+        owner: Username, used to read the global user setting.
+
+    Returns:
+        An ``int`` token cap. ``0`` means "no limit" (explicit user opt-in).
+    """
+    # Tier 1: per-chat (session.max_tokens)
+    if session is not None:
+        v = getattr(session, "max_tokens", None)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+
+    # Tier 2 + 3: per-model (endpoint.model_max_tokens[model]) then
+    # per-endpoint default (endpoint.max_tokens)
+    if endpoint is not None:
+        model_overrides = _parse_model_max_tokens(getattr(endpoint, "model_max_tokens", None))
+        if model and model in model_overrides:
+            return int(model_overrides[model])
+        v = getattr(endpoint, "max_tokens", None)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+
+    # Tier 4: global user setting (Settings → AI → default_max_tokens)
+    try:
+        from src.settings import get_user_setting
+        v = get_user_setting("default_max_tokens", owner or "")
+        if v is not None and v != "":
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        # Settings module may not be importable in every code path (e.g. some
+        # background tasks); never let a config read fail the resolution.
+        pass
+
+    # Tier 5: provider default
+    base = (endpoint_base_url
+            or (getattr(endpoint, "base_url", None) if endpoint is not None else None)
+            or "")
+    if base and _is_anthropic_compatible_url(base):
+        return _ANTHROPIC_PROVIDER_DEFAULT
+    return 0
+
+
+def resolve_max_tokens_with_preset(
+    *,
+    preset_max_tokens: Optional[int] = None,
+    **kwargs,
+) -> int:
+    """Resolve the effective max_tokens for a chat call.
+
+    Convenience wrapper around :func:`resolve_max_tokens` that adds a tier-0
+    override: if the active persona / preset has ``max_tokens`` explicitly
+    set (including 0 for "no limit"), that value wins. Otherwise the
+    chain falls through to the 4-tier resolution.
+
+    Args:
+        preset_max_tokens: The persona's ``max_tokens`` field. ``None``
+            means "no preset, use the chain". ``0`` is an EXPLICIT
+            opt-in for "no limit". Positive values are used as-is.
+        **kwargs: Forwarded to :func:`resolve_max_tokens`.
+    """
+    # Tier 0: the active persona/preset. The user's intentional chat-level
+    # setting beats everything below it.
+    if preset_max_tokens is not None:
+        try:
+            v = int(preset_max_tokens)
+            if v >= 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return resolve_max_tokens(**kwargs)

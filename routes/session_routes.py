@@ -512,7 +512,61 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             result["model"] = model
             result["endpoint_url"] = endpoint_url
         return result
-    
+
+    @router.patch("/session/{sid}/max_tokens")
+    async def set_session_max_tokens(request: Request, sid: str):
+        """Set or clear the per-chat output cap override.
+
+        Body: ``{"max_tokens": <int|null>}``
+
+        - ``null`` clears the override (fall through to per-model →
+          per-endpoint → global → provider default).
+        - ``0`` is a valid explicit value meaning "no limit" (the
+          provider decides).
+        - Positive integers are the cap in tokens.
+
+        Used by the chat header badge to override the cap for a single
+        session without touching the active persona / preset.
+        """
+        _verify_session_owner(request, sid)
+        try:
+            sess = session_manager.get_session(sid)
+        except KeyError:
+            raise HTTPException(404, f"Session {sid} not found")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "Body must be JSON")
+        if "max_tokens" not in body:
+            raise HTTPException(400, "Body must include 'max_tokens'")
+        raw = body["max_tokens"]
+        if raw is None:
+            new_value = None
+        else:
+            try:
+                new_value = int(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "max_tokens must be int or null")
+            if new_value < 0:
+                raise HTTPException(400, "max_tokens must be >= 0")
+        db = SessionLocal()
+        try:
+            db_sess = db.query(DbSession).filter(DbSession.id == sid).first()
+            if not db_sess:
+                raise HTTPException(404, f"Session {sid} not found")
+            db_sess.max_tokens = new_value
+            db_sess.updated_at = datetime.utcnow()
+            db.commit()
+        finally:
+            db.close()
+        # Mirror onto the in-memory session so the next call sees it
+        # without a rehydrate.
+        try:
+            sess.max_tokens = new_value
+        except Exception:
+            pass
+        return {"id": sid, "max_tokens": new_value}
+
     @router.post("/session/{sid}/inject_messages")
     async def inject_messages(request: Request, sid: str):
         """Bulk-inject messages into a session's history (for group chat sync)."""

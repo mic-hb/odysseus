@@ -54,6 +54,11 @@ class Session:
     owner: Optional[str] = None
     is_important: bool = False
     message_count: int = 0
+    # Per-chat output cap. ``None`` means "use the lower tiers"
+    # (per-model → per-endpoint → global → provider default). ``0`` is a
+    # valid explicit value meaning "no limit" (provider decides). Mirrors
+    # the ``sessions.max_tokens`` DB column.
+    max_tokens: Optional[int] = None
 
     def __post_init__(self):
         if self.history is None:

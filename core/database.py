@@ -103,7 +103,13 @@ class Session(TimestampMixin, Base):
 
     # Organization
     folder = Column(String, nullable=True, default=None)
-    
+
+    # Per-chat output cap. NULL falls through to the next tier in
+    # ``resolve_max_tokens`` (per-model → per-endpoint → global → provider
+    # default). 0 is a valid explicit value meaning "no limit" (the
+    # provider decides) — distinct from NULL ("not set").
+    max_tokens = Column(Integer, nullable=True, default=None)
+
     # Headers stored as JSON
     headers = Column(JSON, default=dict)
     
@@ -158,6 +164,7 @@ class Session(TimestampMixin, Base):
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
+            'max_tokens': self.max_tokens,
         }
 
 class ChatMessage(Base):
@@ -362,6 +369,19 @@ class ModelEndpoint(TimestampMixin, Base):
     # is the historical default. When non-null, the model picker only shows
     # the endpoint to that user (admins always see everything).
     owner = Column(String, nullable=True, index=True)
+
+    # Default output cap for every model on this endpoint. NULL = fall
+    # through to the global user setting. 0 = explicit "no limit" (sent
+    # as 0 to the provider). See ``resolve_max_tokens`` for the full
+    # resolution chain.
+    max_tokens = Column(Integer, nullable=True, default=None)
+
+    # Per-model output cap overrides. JSON object: ``{"<model_id>": <cap>}``.
+    # An entry of 0 means "no limit" for that model. Used when an endpoint
+    # hosts models with different context windows (e.g. MiniMax M3 = 1M
+    # vs M2.7 = 204K on the same ``https://api.minimax.io/anthropic``
+    # endpoint).
+    model_max_tokens = Column(Text, nullable=True, default=None)
 
 class McpServer(TimestampMixin, Base):
     """Admin-configured MCP (Model Context Protocol) tool servers."""
@@ -1575,6 +1595,47 @@ def _migrate_seed_email_account():
         logging.getLogger(__name__).warning(f"seed email account migration: {e}")
 
 
+def _migrate_add_max_tokens_columns():
+    """Add max_tokens columns for the 4-tier output cap resolution chain:
+
+    - ``sessions.max_tokens``         — per-chat override (null = fall through)
+    - ``model_endpoints.max_tokens``  — per-endpoint default (null = fall through)
+    - ``model_endpoints.model_max_tokens`` — JSON ``{model_id: cap}`` map
+                                            for per-model overrides (null/empty = fall through)
+
+    All three are nullable. ``None`` means "use the next-lower tier";
+    ``0`` is a *valid* explicit value meaning "no limit" (the provider
+    decides). This matches the resolution in
+    :func:`src.endpoint_resolver.resolve_max_tokens`.
+    Idempotent: each ALTER is guarded by PRAGMA table_info.
+    """
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+
+        cur = conn.execute("PRAGMA table_info(sessions)")
+        sess_cols = {row[1] for row in cur.fetchall()}
+        if sess_cols and "max_tokens" not in sess_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN max_tokens INTEGER")
+
+        cur = conn.execute("PRAGMA table_info(model_endpoints)")
+        ep_cols = {row[1] for row in cur.fetchall()}
+        if ep_cols:
+            if "max_tokens" not in ep_cols:
+                conn.execute("ALTER TABLE model_endpoints ADD COLUMN max_tokens INTEGER")
+            if "model_max_tokens" not in ep_cols:
+                conn.execute("ALTER TABLE model_endpoints ADD COLUMN model_max_tokens TEXT")
+
+        conn.commit()
+        conn.close()
+        logging.getLogger(__name__).info("Migrated: max_tokens columns on sessions + model_endpoints")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"max_tokens columns migration failed: {e}")
+
+
 # WARNING: Foreign-key enforcement is enabled globally for all SQLite connections.
 # Any future migrations or schema changes that temporarily violate foreign-key
 # constraints will fail. To perform such operations, foreign_keys must be
@@ -1624,6 +1685,7 @@ def init_db():
     _migrate_encrypt_email_passwords()
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
+    _migrate_add_max_tokens_columns()
 
 
 def _migrate_add_email_smtp_security():

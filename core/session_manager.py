@@ -117,6 +117,7 @@ class SessionManager:
             history=[],
             owner=getattr(db_session, "owner", None),
             is_important=getattr(db_session, "is_important", False) or False,
+            max_tokens=getattr(db_session, "max_tokens", None),
         )
         session.message_count = getattr(db_session, "message_count", 0) or 0
         return session
@@ -175,6 +176,7 @@ class SessionManager:
             history=history,
             owner=getattr(db_session, 'owner', None),
             is_important=getattr(db_session, 'is_important', False) or False,
+            max_tokens=getattr(db_session, 'max_tokens', None),
         )
 
         session.message_count = getattr(db_session, 'message_count', len(history))

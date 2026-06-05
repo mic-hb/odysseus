@@ -24,10 +24,76 @@ from src.endpoint_resolver import (
     build_chat_url,
     build_models_url,
     build_headers,
+    _parse_model_max_tokens as _parse_model_max_tokens_for_response,
 )
 from src.auth_helpers import _auth_disabled, owner_filter
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_max_tokens_update(raw) -> Optional[int]:
+    """Parse a max_tokens value from a PATCH body.
+
+    Returns the validated int (>=0), or ``None`` to clear the column.
+    Raises ``HTTPException(400)`` on any other shape (string, list,
+    negative number, etc.) so the admin sees a clear error rather than
+    a silent miss.
+    """
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        # bool is a subclass of int; reject it explicitly so a stray
+        # ``"supports_tools": true`` JSON doesn't accidentally set a
+        # token cap.
+        raise HTTPException(400, "max_tokens must be a non-negative integer or null")
+    if not isinstance(raw, int):
+        try:
+            raw = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "max_tokens must be a non-negative integer or null")
+    if raw < 0:
+        raise HTTPException(400, "max_tokens must be >= 0")
+    return raw
+
+
+def _parse_model_max_tokens_update(raw) -> Optional[str]:
+    """Parse a per-model max_tokens map from a PATCH body.
+
+    Accepts either a dict ``{"<model_id>": <int|null>, ...}`` (which we
+    serialise to JSON) or a JSON string. Returns the JSON string to
+    store, or ``None`` to clear the column.
+    """
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "model_max_tokens must be a JSON object or null")
+    else:
+        data = raw
+    if not isinstance(data, dict):
+        raise HTTPException(400, "model_max_tokens must be a JSON object")
+    cleaned = {}
+    for k, v in data.items():
+        if not isinstance(k, str) or not k:
+            continue
+        if v is None or v == "":
+            # ``null`` removes the per-model override; drop it from the map.
+            continue
+        if isinstance(v, bool) or not isinstance(v, int):
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    400, f"model_max_tokens[{k!r}] must be a non-negative integer or null"
+                )
+        if v < 0:
+            raise HTTPException(
+                400, f"model_max_tokens[{k!r}] must be >= 0"
+            )
+        cleaned[k] = v
+    return json.dumps(cleaned) if cleaned else None
 
 _SPEECH_ENDPOINT_SETTINGS = (
     ("tts_provider", "tts_model", "tts-1", "Text to Speech"),
@@ -1411,6 +1477,12 @@ def setup_model_routes(model_discovery):
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
                     "model_refresh_interval": getattr(r, "model_refresh_interval", None),
                     "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
+                    # Output-cap config — surfaced for the endpoint detail UI
+                    # (per-endpoint default + per-model override map). See
+                    # ``resolve_max_tokens`` for the 4-tier chain that
+                    # combines these with the session / global settings.
+                    "max_tokens": getattr(r, "max_tokens", None),
+                    "model_max_tokens": _parse_model_max_tokens_for_response(getattr(r, "model_max_tokens", None)),
                 })
             return results
         finally:
@@ -1920,6 +1992,14 @@ def setup_model_routes(model_discovery):
                 if "model_refresh_timeout" in body:
                     timeout = _parse_positive_int(body.get("model_refresh_timeout"), minimum=1, maximum=60)
                     ep.model_refresh_timeout = timeout
+                # Output cap config. The 4-tier chain (session → per-model
+                # → per-endpoint → global → provider default) reads these
+                # columns via ``resolve_max_tokens``. See that function for
+                # the precedence rules. ``null``/missing clears the field.
+                if "max_tokens" in body:
+                    ep.max_tokens = _parse_max_tokens_update(body.get("max_tokens"))
+                if "model_max_tokens" in body:
+                    ep.model_max_tokens = _parse_model_max_tokens_update(body.get("model_max_tokens"))
                 # Rotating an API key used to require DELETE+POST, which wiped
                 # endpoint_url/model from every session referencing the old base
                 # URL. Allow in-place updates so the admin can change the key
@@ -1953,6 +2033,10 @@ def setup_model_routes(model_discovery):
                 "model_refresh_mode": getattr(ep, "model_refresh_mode", None) or "auto",
                 "model_refresh_interval": getattr(ep, "model_refresh_interval", None),
                 "model_refresh_timeout": getattr(ep, "model_refresh_timeout", None),
+                # Output cap config echoed back so the UI can refresh its
+                # state without a follow-up GET.
+                "max_tokens": getattr(ep, "max_tokens", None),
+                "model_max_tokens": _parse_model_max_tokens_for_response(getattr(ep, "model_max_tokens", None)),
             }
         finally:
             db.close()

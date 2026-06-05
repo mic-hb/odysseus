@@ -2631,6 +2631,33 @@ body.bg-pattern-sparkles {
       flex-shrink: 0;
       opacity: 0.5;
     }
+    /* Per-chat max-tokens badge. Sits next to the model picker; shows the
+       current effective cap (with the tier that produced it). Click to
+       override for this session — persists to sessions.max_tokens. */
+    .chat-maxtokens-btn {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+      line-height: 1.4;
+      background: color-mix(in srgb, var(--fg) 6%, transparent);
+      color: color-mix(in srgb, var(--fg) 75%, transparent);
+      border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background 0.12s, color 0.12s;
+    }
+    .chat-maxtokens-btn:hover {
+      background: color-mix(in srgb, var(--fg) 12%, transparent);
+      color: var(--fg);
+    }
+    .chat-maxtokens-btn.is-overridden {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--accent);
+      border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    }
     .model-picker-logo {
       display: inline-flex;
       align-items: center;

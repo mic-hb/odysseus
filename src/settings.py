@@ -85,6 +85,14 @@ DEFAULT_SETTINGS = {
     "research_search_provider": "",
     "research_max_tokens": 16384,
     "research_extraction_timeout_seconds": 90,
+    # Global default for the LLM output cap. Used by the 4-tier
+    # ``resolve_max_tokens`` chain in ``src.endpoint_resolver`` as the
+    # fallback when no session / per-endpoint / per-model override is
+    # set. ``0`` means "no limit" (provider decides). ``None`` /
+    # missing falls through to the provider default (4096 for
+    # Anthropic / Anthropic-compatible endpoints, 0 elsewhere).
+    "default_max_tokens": 0,
+    "research_extraction_timeout_seconds": 90,
     # Lightweight planning/query LLM calls happen before any search starts.
     # Keep them separately tunable so slow local backends are not capped by
     # the old 30s/60s per-call defaults.

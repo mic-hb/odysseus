@@ -368,6 +368,75 @@ function _bindFallbackWidget(opts) {
   };
 }
 
+/* ── Output Cap (global default max_tokens) ── */
+async function initOutputCapSettings() {
+  const input = el('set-defaultMaxTokens');
+  const msg = el('set-defaultMaxTokensMsg');
+  if (!input) return;
+  let settings = {};
+  try {
+    const r = await fetch(`${API_BASE}/api/settings`, { credentials: 'same-origin' });
+    settings = (await r.json()) || {};
+  } catch (e) {
+    if (msg) { msg.textContent = 'Could not load settings: ' + e.message; msg.style.color = 'var(--red)'; }
+    return;
+  }
+  // Coerce legacy / unset values to a clean integer. ``0`` is the explicit
+  // "no limit" sentinel — see resolve_max_tokens in src/endpoint_resolver.
+  const v = (settings.default_max_tokens === '' || settings.default_max_tokens == null)
+    ? 0
+    : parseInt(settings.default_max_tokens, 10);
+  input.value = Number.isFinite(v) ? String(v) : '0';
+
+  let _saveTimer = null;
+  const _save = async () => {
+    const raw = (input.value || '').trim();
+    let num;
+    if (raw === '' || raw === '0') {
+      num = 0;
+    } else {
+      num = parseInt(raw, 10);
+      if (!Number.isFinite(num) || num < 0) {
+        if (msg) { msg.textContent = 'Must be 0 (no limit) or a positive integer.'; msg.style.color = 'var(--red)'; }
+        return;
+      }
+      if (num > 131072) {
+        if (msg) { msg.textContent = 'Cap is limited to 131,072 (128K) in this UI. Edit data/settings.json for higher.'; msg.style.color = 'var(--red)'; }
+        return;
+      }
+    }
+    try {
+      const r = await fetch(`${API_BASE}/api/settings`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ default_max_tokens: num }),
+      });
+      if (!r.ok) {
+        const _t = await r.text();
+        if (msg) { msg.textContent = 'Save failed: ' + _t; msg.style.color = 'var(--red)'; }
+        return;
+      }
+      if (msg) {
+        msg.textContent = num === 0 ? 'No limit (provider decides).' : `Default cap: ${num.toLocaleString()} tokens.`;
+        msg.style.color = 'color-mix(in srgb, var(--fg) 45%, transparent)';
+      }
+    } catch (e) {
+      if (msg) { msg.textContent = 'Save failed: ' + e.message; msg.style.color = 'var(--red)'; }
+    }
+  };
+  // Save on Enter, or 600ms after the user stops typing.
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); _save(); }
+  });
+  input.addEventListener('input', () => {
+    if (msg) { msg.textContent = ''; msg.style.color = 'color-mix(in srgb, var(--fg) 45%, transparent)'; }
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(_save, 600);
+  });
+  input.addEventListener('blur', _save);
+}
+
 /* ── Default Chat Model ── */
 async function initDefaultChat() {
   var epSel = el('set-defaultEpSelect');
@@ -2178,6 +2247,7 @@ function initAll() {
   initClose();
   initOpacityToggle();
   initialized = true;
+  initOutputCapSettings();
   initDefaultChat();
   initTeacherModel();
   initUtilityModel();

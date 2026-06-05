@@ -717,4 +717,14 @@ export function updateModelPicker() {
   } else {
     label.textContent = displayName;
   }
+
+  // Side effect: refresh the per-chat max-tokens badge so it tracks the
+  // currently-active session (label flips between "cap: auto" and the
+  // explicit override value when the user switches chats).
+  try {
+    const cb = window.chatMaxTokensModule;
+    if (cb && typeof cb.updateChatMaxTokensBadge === 'function') {
+      cb.updateChatMaxTokensBadge(s || null);
+    }
+  } catch (_) { /* best-effort */ }
 }

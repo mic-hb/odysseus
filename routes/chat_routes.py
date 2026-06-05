@@ -335,13 +335,19 @@ def setup_chat_routes(
             except Exception as e:
                 logger.error(f"Research failed: {e}")
 
+        # Resolve the effective output cap using the 4-tier chain
+        # (preset → session → per-model → per-endpoint → global → provider
+        # default). See resolve_max_tokens_with_preset for the full rules.
+        from routes.chat_helpers import resolve_effective_max_tokens
+        effective_max_tokens = resolve_effective_max_tokens(sess, ctx.preset.max_tokens)
+
         reply = await llm_call_async(
             sess.endpoint_url,
             sess.model,
             ctx.messages,
             headers=sess.headers,
             temperature=ctx.preset.temperature,
-            max_tokens=ctx.preset.max_tokens,
+            max_tokens=effective_max_tokens,
             prompt_type=preset_id,
         )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
@@ -873,6 +879,11 @@ def setup_chat_routes(
             elif chat_mode == "chat":
                 _chat_start = time.time()
                 _answered_by = None  # set if the selected model failed and a fallback answered
+                # Resolve the effective cap once per request (4-tier chain
+                # in resolve_max_tokens_with_preset). See chat_helpers for
+                # the precedence rules.
+                from routes.chat_helpers import resolve_effective_max_tokens
+                _effective_max_tokens = resolve_effective_max_tokens(sess, ctx.preset.max_tokens)
                 # ── Chat mode: call stream_llm directly, NO tools, NO document access ──
                 try:
                     _chat_candidates = [(sess.endpoint_url, sess.model, sess.headers)] + _fallback_candidates
@@ -880,12 +891,10 @@ def setup_chat_routes(
                         _chat_candidates,
                         messages,
                         temperature=ctx.preset.temperature,
-                        # Respect the preset; 0/unset = let the server decide (no
-                        # cap), matching agent mode. The old hard 4096 fallback
-                        # truncated reasoning models mid-<think> — they'd burn the
-                        # whole budget thinking and never emit the answer (seen in
-                        # Compare on heavy generation prompts).
-                        max_tokens=ctx.preset.max_tokens,
+                        # 4-tier resolution: preset → session → per-model →
+                        # per-endpoint → global → provider default. ``0`` is
+                        # honored as "no limit" (the provider decides).
+                        max_tokens=_effective_max_tokens,
                         prompt_type=preset_id,
                         tools=None,
                     ):
@@ -998,13 +1007,17 @@ def setup_chat_routes(
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
 
+                    # Resolve the effective cap once per request (4-tier chain).
+                    from routes.chat_helpers import resolve_effective_max_tokens
+                    _effective_max_tokens = resolve_effective_max_tokens(sess, ctx.preset.max_tokens)
+
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
                         sess.model,
                         messages,
                         headers=sess.headers,
                         temperature=ctx.preset.temperature,
-                        max_tokens=ctx.preset.max_tokens,
+                        max_tokens=_effective_max_tokens,
                         prompt_type=preset_id,
                         max_tool_calls=_tool_budget,
                         max_rounds=_max_rounds,

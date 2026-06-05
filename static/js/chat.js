@@ -15,6 +15,8 @@ import markdownModule from './markdown.js';
 import { svgifyEmoji } from './markdown.js';
 import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
+import * as chatMaxTokensModule from './chatMaxTokens.js';
+window.chatMaxTokensModule = chatMaxTokensModule;
 import fileHandlerModule from './fileHandler.js';
 import searchModule from './search.js';
 import documentModule from './document.js';
@@ -159,6 +161,8 @@ import createResearchSynapse from './researchSynapse.js';
     initSlashCommands({ apiBase, isStreaming: () => isStreaming });
     // Initialize email inbox
     emailInbox.init(documentModule);
+    // Per-chat max-tokens badge (click to override for this session).
+    chatMaxTokensModule.initChatMaxTokens();
     // Wire the slash-command autocomplete popup on the chat composer. The
     // dispatcher already handles the typed command — this just surfaces the
     // registry as a discoverable menu when the user starts a message with /.

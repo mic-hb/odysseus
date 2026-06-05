@@ -615,7 +615,16 @@ def _convert_openai_content_to_anthropic(content):
 
 
 def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=False, tools=None):
-    """Convert OpenAI-style messages to Anthropic format."""
+    """Convert OpenAI-style messages to Anthropic format.
+
+    ``max_tokens`` semantics:
+    - ``None`` (or not passed) → fall back to the Anthropic default (4096).
+      Keeps the legacy behaviour for callers that didn't opt into the
+      multi-tier resolution chain.
+    - ``0`` → "no limit" is passed through verbatim (Anthropic will reject
+      with a 400; that is the user's explicit opt-in).
+    - ``>0`` → used as the cap.
+    """
     system_parts = []
     chat_messages = []
     for m in messages:
@@ -663,7 +672,9 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
     payload = {
         "model": model,
         "messages": chat_messages,
-        "max_tokens": max_tokens if max_tokens and max_tokens > 0 else 4096,
+        # None → 4096 (legacy fallback). 0 → "no limit" passes through.
+        # Any positive int → use as-is.
+        "max_tokens": max_tokens if max_tokens is not None and max_tokens >= 0 else 4096,
         "temperature": temperature,
     }
     if system_parts:

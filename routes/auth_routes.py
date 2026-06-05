@@ -444,6 +444,13 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             "agent_max_rounds": (1, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
         }
+        # Settings that must be non-negative ints but have no upper cap.
+        # ``default_max_tokens`` is a token cap, not a turn/budget cap, and
+        # the user may legitimately set 32K / 64K / 1M for long-context
+        # models. ``0`` is the explicit "no limit" sentinel.
+        _NON_NEGATIVE_INTS = {
+            "default_max_tokens",
+        }
         for key in DEFAULT_SETTINGS:
             if key not in body:
                 continue
@@ -455,6 +462,16 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 except (TypeError, ValueError):
                     raise HTTPException(400, f"{key} must be an integer")
                 val = max(lo, min(val, hi))
+            elif key in _NON_NEGATIVE_INTS:
+                if val is None or val == "":
+                    val = 0
+                if isinstance(val, bool) or not isinstance(val, int):
+                    try:
+                        val = int(val)
+                    except (TypeError, ValueError):
+                        raise HTTPException(400, f"{key} must be a non-negative integer or null")
+                if val < 0:
+                    raise HTTPException(400, f"{key} must be >= 0")
             current[key] = val
         _save_settings(current)
         return current

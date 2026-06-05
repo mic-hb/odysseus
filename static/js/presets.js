@@ -175,7 +175,13 @@ function initEnabledToggle() {
   if (tokensSlider && tokensValue) {
     tokensSlider.addEventListener('input', () => {
       const v = parseInt(tokensSlider.value);
-      tokensValue.textContent = v > 8192 ? 'No limit' : v.toLocaleString();
+      // Slider range is 256 — 131072. ``0`` (no limit) is reachable only
+      // via the per-chat badge in the chat header, not this slider; the
+      // persona modal always sets a concrete cap. Format as e.g. "8K" /
+      // "64K" once the value is >= 1024 for legibility.
+      tokensValue.textContent = v >= 1024
+        ? `${(v / 1024).toFixed(v % 1024 === 0 ? 0 : 1)}K`
+        : v.toLocaleString();
     });
   }
 }
@@ -214,7 +220,7 @@ function initNameDropdown() {
       const nameRow = document.getElementById('char-name-row');
       if (nameRow) nameRow.style.display = '';
       if (tempInput) { tempInput.value = 1.0; if (tempValue) tempValue.textContent = '1.0'; tempInput.dispatchEvent(new Event('input')); }
-      if (tokensInput) { tokensInput.value = 8448; if (tokensValue) tokensValue.textContent = 'No limit'; tokensInput.dispatchEvent(new Event('input')); }
+      if (tokensInput) { tokensInput.value = 8448; if (tokensValue) tokensValue.textContent = '8K'; tokensInput.dispatchEvent(new Event('input')); }
       if (delBtn) delBtn.style.display = 'none';
       return;
     }
@@ -467,7 +473,10 @@ function initSaveAsTemplate() {
       name: name,
       system_prompt: promptInput ? promptInput.value : '',
       temperature: tempInput ? parseFloat(tempInput.value) : 1.0,
-      max_tokens: _rawTk > 8192 ? 0 : _rawTk,
+      // Slider min is 256, so the persona always sets a concrete cap. The
+      // ``> 8192 ? 0`` legacy escape hatch is gone — use the per-chat badge
+      // in the chat header if you want "no limit" for one session.
+      max_tokens: _rawTk,
     };
 
     try {
@@ -772,7 +781,9 @@ export async function saveCustomPreset(showToast, showError) {
   const name = _isInjectStart ? '' : (nameInput ? nameInput.value.trim() : '');
   const temperature = parseFloat(tempInput.value);
   const rawTokens = parseInt(tokensInput.value);
-  const max_tokens = rawTokens > 8192 ? 0 : rawTokens;
+  // Slider min is 256, so the persona always sets a concrete cap (no
+  // ``> 8192 → 0`` collapse). Use the per-chat badge for one-off "no limit".
+  const max_tokens = rawTokens;
   const system_prompt = _isInjectStart ? '' : promptInput.value;
 
   const enabled = true; // always enabled when saving — deactivation happens via X/Reset

@@ -426,12 +426,14 @@ async function loadEndpoints() {
             </div>
             <div style="display:flex;gap:4px;align-items:center;">
               <button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button>
+              <button class="admin-btn-sm" data-adm-max-tokens-ep="${ep.id}" title="Configure per-endpoint and per-model max output tokens">Max tokens</button>
               <button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>
               ${hasModels ? '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>' : ''}
             </div>
           </div>
           <div class="admin-ep-detail">${esc(ep.base_url)}${category === 'local' ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${ep.has_key ? ' (key set)' : ''}</div>
           ${hasModels ? `<div class="mcp-tools-panel hidden" data-adm-ep-models-panel="${ep.id}"></div>` : ''}
+          <div class="mcp-tools-panel hidden" data-adm-ep-maxtokens-panel="${ep.id}"></div>
         </div>`;
     });
     // Partition rows into Local vs API for the split sections.
@@ -468,6 +470,23 @@ async function loadEndpoints() {
     };
     queryAll('[data-adm-toggle-ep]').forEach(btn => {
       btn.addEventListener('click', async (e) => { e.stopPropagation(); await fetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' }); loadEndpoints(); });
+    });
+    // "Max tokens" button — opens a panel with per-endpoint default and
+    // per-model override editors. Independent of the models panel so the
+    // admin can leave both open. See resolve_max_tokens for the 4-tier
+    // resolution chain that uses these values.
+    queryAll('[data-adm-max-tokens-ep]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const epId = btn.dataset.admMaxTokensEp;
+        const panel = btn.closest('[data-adm-ep-id]')?.querySelector(`[data-adm-ep-maxtokens-panel="${epId}"]`);
+        if (!panel) return;
+        const wasHidden = panel.classList.contains('hidden');
+        panel.classList.toggle('hidden');
+        if (wasHidden) {
+          await _renderMaxTokensPanel(epId, panel);
+        }
+      });
     });
     queryAll('[data-adm-copy-url]').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -669,6 +688,179 @@ async function _saveEpModelState(epId, panel) {
       settingsModule.refreshAiModelEndpoints();
     }
   } catch (e) { /* silent */ }
+}
+
+// ── Max-tokens editor (per-endpoint default + per-model overrides) ──
+//
+// The chain in ``resolve_max_tokens`` is: session → per-model → per-endpoint
+// → global → provider default. This editor handles the middle two tiers
+// (per-endpoint + per-model). The global default is in Settings → AI, and
+// the per-chat override is in the chat header.
+//
+// The per-model list comes from /api/model-endpoints/{id}/models (same as
+// the "Models" panel) so admin-pinned models and freshly-probed ones
+// both show up. ``0`` is the explicit "no limit" sentinel — distinct from
+// an empty field (which means "fall through to the per-endpoint default").
+
+async function _renderMaxTokensPanel(epId, panel) {
+  panel.innerHTML = `<div class="mcp-tools-header">
+    <span>Output cap</span>
+    <span style="font-size:11px;opacity:0.55;">0 = no limit</span>
+  </div><div style="padding:6px 4px;opacity:0.55;font-size:11px;">Loading…</div>`;
+
+  let models = [];
+  let epRow = null;
+  try {
+    const [mRes, eRes] = await Promise.all([
+      fetch(`/api/model-endpoints/${epId}/models`, { credentials: 'same-origin' }),
+      fetch('/api/model-endpoints', { credentials: 'same-origin' }),
+    ]);
+    if (mRes.ok) models = (await mRes.json()) || [];
+    if (eRes.ok) {
+      const all = (await eRes.json()) || [];
+      epRow = all.find(x => String(x.id) === String(epId)) || null;
+    }
+  } catch (e) {
+    panel.innerHTML = `<div class="mcp-tools-header"><span>Output cap</span></div>
+      <div class="admin-error" style="font-size:11px;">Failed to load: ${esc(e.message)}</div>`;
+    return;
+  }
+  if (!epRow) {
+    panel.innerHTML = `<div class="mcp-tools-header"><span>Output cap</span></div>
+      <div class="admin-error" style="font-size:11px;">Endpoint not found.</div>`;
+    return;
+  }
+  const epMax = (epRow.max_tokens == null) ? '' : String(epRow.max_tokens);
+  const overrides = epRow.model_max_tokens || {};
+  const sorted = (models || []).slice().sort((a, b) => {
+    const an = (a.display || a.id || '').toLowerCase();
+    const bn = (b.display || b.id || '').toLowerCase();
+    return an.localeCompare(bn);
+  });
+  // Render the editor.
+  const rowHtml = sorted.length ? sorted.map(m => {
+    const id = m.id;
+    const cap = (overrides && Object.prototype.hasOwnProperty.call(overrides, id)) ? String(overrides[id]) : '';
+    const hasCap = cap !== '' && cap != null;
+    const usedBy = hasCap ? cap : (epMax === '' ? '—' : epMax);
+    const usedLabel = hasCap ? cap : ((epMax === '' || epMax === '0') ? (epMax === '0' ? '∞' : '—') : epMax);
+    return `<div class="adm-maxtokens-row" data-adm-mt-row data-model-id="${esc(id)}" style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid color-mix(in srgb, var(--fg) 8%, transparent);">
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(id)}">${esc(m.display || id)}</span>
+      <span style="font-size:10px;opacity:0.45;min-width:48px;text-align:right;">uses ${esc(usedLabel)}</span>
+      <input type="number" class="adm-mt-input" data-adm-mt-input="${esc(id)}" min="0" max="131072" step="256" value="${esc(cap)}" placeholder="(inherits ${epMax === '' ? 'global' : epMax})" style="width:130px;padding:3px 6px;background:var(--bg);color:var(--fg);border:1px solid color-mix(in srgb, var(--fg) 18%, transparent);border-radius:4px;font-size:12px;">
+    </div>`;
+  }).join('') : `<div style="font-size:11px;opacity:0.55;padding:6px 0;">No models known yet. Refresh the models list to discover what's available, then come back.</div>`;
+
+  panel.innerHTML = `<div class="mcp-tools-header">
+    <span>Output cap</span>
+    <span style="font-size:11px;opacity:0.55;">0 = no limit</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;padding:6px 0;">
+    <label style="flex:1;font-size:12px;opacity:0.85;">Default for this endpoint <span style="opacity:0.55;font-size:10px;">(0 = no limit, blank = use global default)</span></label>
+    <input type="number" id="adm-ep-mt-default" min="0" max="131072" step="256" value="${esc(epMax)}" placeholder="(global)" style="width:130px;padding:3px 6px;background:var(--bg);color:var(--fg);border:1px solid color-mix(in srgb, var(--fg) 18%, transparent);border-radius:4px;font-size:12px;">
+    <button class="admin-btn-sm" data-adm-mt-save-default="${epId}">Save</button>
+  </div>
+  <div style="font-size:11px;opacity:0.55;padding:0 0 6px;">Per-model overrides take precedence over the per-endpoint default. Leave a model's field blank to inherit.</div>
+  <div id="adm-ep-mt-rows" data-ep-id="${epId}">${rowHtml}</div>
+  <div id="adm-ep-mt-msg" style="font-size:11px;margin-top:4px;min-height:1em;"></div>`;
+
+  // Save per-endpoint default.
+  panel.querySelector(`[data-adm-mt-save-default="${epId}"]`)?.addEventListener('click', async () => {
+    const input = panel.querySelector('#adm-ep-mt-default');
+    const msg = panel.querySelector('#adm-ep-mt-msg');
+    const raw = (input.value || '').trim();
+    let payload;
+    if (raw === '') {
+      payload = null;
+    } else {
+      const n = parseInt(raw, 10);
+      if (!Number.isFinite(n) || n < 0) {
+        if (msg) { msg.textContent = 'Must be 0 or a positive integer.'; msg.style.color = 'var(--red)'; }
+        return;
+      }
+      payload = n;
+    }
+    try {
+      const r = await fetch(`/api/model-endpoints/${epId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ max_tokens: payload }),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        if (msg) { msg.textContent = 'Save failed: ' + t; msg.style.color = 'var(--red)'; }
+        return;
+      }
+      if (msg) {
+        msg.textContent = payload === null ? 'Per-endpoint default cleared (using global).' : `Per-endpoint default: ${payload.toLocaleString()} tokens.`;
+        msg.style.color = 'color-mix(in srgb, var(--fg) 45%, transparent)';
+      }
+    } catch (e) {
+      if (msg) { msg.textContent = 'Save failed: ' + e.message; msg.style.color = 'var(--red)'; }
+    }
+  });
+
+  // Save per-model override (debounced per input).
+  const _saveOverride = async (modelId, raw) => {
+    const msg = panel.querySelector('#adm-ep-mt-msg');
+    const trimmed = (raw || '').trim();
+    let value;
+    if (trimmed === '') {
+      value = null;
+    } else {
+      const n = parseInt(trimmed, 10);
+      if (!Number.isFinite(n) || n < 0) {
+        if (msg) { msg.textContent = `${modelId}: must be 0 or positive.`; msg.style.color = 'var(--red)'; }
+        return;
+      }
+      value = n;
+    }
+    // Fetch current overrides, merge, and PATCH the full map (the API
+    // expects a complete dict on update).
+    let current = {};
+    try {
+      const r = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+      const all = (await r.json()) || [];
+      const ep = all.find(x => String(x.id) === String(epId));
+      if (ep && ep.model_max_tokens) current = { ...ep.model_max_tokens };
+    } catch (_) {}
+    if (value === null) {
+      delete current[modelId];
+    } else {
+      current[modelId] = value;
+    }
+    try {
+      const r = await fetch(`/api/model-endpoints/${epId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ model_max_tokens: current }),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        if (msg) { msg.textContent = 'Save failed: ' + t; msg.style.color = 'var(--red)'; }
+        return;
+      }
+      if (msg) {
+        msg.textContent = value === null ? `${modelId}: cleared (inherits endpoint default).` : `${modelId}: ${value.toLocaleString()} tokens.`;
+        msg.style.color = 'color-mix(in srgb, var(--fg) 45%, transparent)';
+      }
+    } catch (e) {
+      if (msg) { msg.textContent = 'Save failed: ' + e.message; msg.style.color = 'var(--red)'; }
+    }
+  };
+  panel.querySelectorAll('.adm-mt-input').forEach(input => {
+    const modelId = input.dataset.admMtInput;
+    let _t = null;
+    const fire = () => {
+      clearTimeout(_t);
+      _t = setTimeout(() => _saveOverride(modelId, input.value), 500);
+    };
+    input.addEventListener('input', fire);
+    input.addEventListener('blur', fire);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); _saveOverride(modelId, input.value); } });
+  });
 }
 
 function initEndpointForm() {
