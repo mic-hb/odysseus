@@ -2,11 +2,13 @@ import os
 import logging
 import sqlite3
 from datetime import datetime, timezone
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import event, create_engine, inspect, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
 from sqlalchemy.orm import relationship, sessionmaker, backref
+
+from .dialect_utils import table_columns, table_exists
 
 logger = logging.getLogger(__name__)
 
@@ -1160,7 +1162,7 @@ def _migrate_backfill_document_owner_from_session():
     admin assignment. Idempotent — only touches NULL-owner rows."""
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(documents)"))]
+            cols = table_columns(conn, "documents")
             if "owner" not in cols:
                 return
             res = conn.execute(text(
@@ -1182,7 +1184,7 @@ def _migrate_add_tidy_verdict():
     """Add tidy_verdict column to documents table if missing."""
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(documents)"))]
+            cols = table_columns(conn, "documents")
             if "tidy_verdict" not in cols:
                 conn.execute(text("ALTER TABLE documents ADD COLUMN tidy_verdict VARCHAR"))
                 conn.commit()
@@ -1201,7 +1203,7 @@ def _migrate_add_doc_source_email_cols():
     }
     try:
         with engine.connect() as conn:
-            existing = {r[1] for r in conn.execute(text("PRAGMA table_info(documents)"))}
+            existing = set(table_columns(conn, "documents"))
             for col, spec in cols_to_add.items():
                 if col not in existing:
                     conn.execute(text(f"ALTER TABLE documents ADD COLUMN {col} {spec}"))
@@ -1227,14 +1229,14 @@ def _migrate_add_task_automation_columns():
     }
     try:
         with engine.connect() as conn:
-            cols_info = list(conn.execute(text("PRAGMA table_info(scheduled_tasks)")))
-            col_names = [r[1] for r in cols_info]
+            cols_info = inspect(conn).get_columns("scheduled_tasks")
+            col_names = [c["name"] for c in cols_info]
             for col_name, col_def in new_cols.items():
                 if col_name not in col_names:
                     conn.execute(text(f"ALTER TABLE scheduled_tasks ADD COLUMN {col_name} {col_def}"))
 
             # Check if prompt/schedule/scheduled_time are still NOT NULL — need table rebuild
-            notnull_map = {r[1]: r[3] for r in cols_info}
+            notnull_map = {c["name"]: 0 if c.get("nullable", True) else 1 for c in cols_info}
             needs_rebuild = (
                 notnull_map.get("prompt", 0) == 1 or
                 notnull_map.get("schedule", 0) == 1 or
@@ -1292,7 +1294,7 @@ def _migrate_add_oauth_config():
     """Add oauth_config column to mcp_servers table if missing."""
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(mcp_servers)"))]
+            cols = table_columns(conn, "mcp_servers")
             if "oauth_config" not in cols:
                 conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN oauth_config TEXT"))
                 conn.commit()
@@ -1304,7 +1306,7 @@ def _migrate_add_disabled_tools():
     """Add disabled_tools column to mcp_servers table if missing."""
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(mcp_servers)"))]
+            cols = table_columns(conn, "mcp_servers")
             if "disabled_tools" not in cols:
                 conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN disabled_tools TEXT"))
                 conn.commit()
@@ -1321,7 +1323,7 @@ def _migrate_add_mcp_oauth_tokens_column():
     TEXT. This matches the existing encrypted columns (see _migrate_encrypt_*)."""
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(mcp_servers)"))]
+            cols = table_columns(conn, "mcp_servers")
             if "oauth_tokens" not in cols:
                 conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN oauth_tokens TEXT"))
                 conn.commit()
@@ -1338,7 +1340,7 @@ def _migrate_add_task_v2_columns():
     }
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
+            cols = table_columns(conn, "scheduled_tasks")
             for col_name, col_def in new_cols.items():
                 if col_name not in cols:
                     conn.execute(text(f"ALTER TABLE scheduled_tasks ADD COLUMN {col_name} {col_def}"))
@@ -1374,7 +1376,7 @@ def _migrate_add_notifications_enabled():
     """Per-task notification on/off toggle (default ON)."""
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
+            cols = table_columns(conn, "scheduled_tasks")
             if "notifications_enabled" not in cols:
                 conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN notifications_enabled BOOLEAN DEFAULT 1"))
                 conn.commit()
@@ -1387,12 +1389,12 @@ def _migrate_add_crew_member_id():
     """Add crew_member_id column to sessions and scheduled_tasks tables if missing."""
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(sessions)"))]
+            cols = table_columns(conn, "sessions")
             if "crew_member_id" not in cols:
                 conn.execute(text("ALTER TABLE sessions ADD COLUMN crew_member_id TEXT"))
                 conn.commit()
                 logging.getLogger(__name__).info("Added crew_member_id column to sessions")
-            cols2 = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
+            cols2 = table_columns(conn, "scheduled_tasks")
             if "crew_member_id" not in cols2:
                 conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN crew_member_id TEXT"))
                 conn.commit()
@@ -1404,7 +1406,7 @@ def _migrate_add_assistant_columns():
     """Add is_default_assistant + timezone columns to crew_members for the personal-assistant feature."""
     try:
         with engine.connect() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(crew_members)"))]
+            cols = table_columns(conn, "crew_members")
             if "is_default_assistant" not in cols:
                 conn.execute(text("ALTER TABLE crew_members ADD COLUMN is_default_assistant BOOLEAN DEFAULT 0"))
                 conn.commit()
@@ -1514,10 +1516,7 @@ def _migrate_seed_email_account():
     upgraded. Safe to run repeatedly — it short-circuits once any row exists."""
     try:
         with engine.connect() as conn:
-            tables = [r[0] for r in conn.execute(text(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='email_accounts'"
-            ))]
-            if "email_accounts" not in tables:
+            if not table_exists(conn, "email_accounts"):
                 return
             existing = conn.execute(text("SELECT COUNT(*) FROM email_accounts")).scalar() or 0
             if existing > 0:
