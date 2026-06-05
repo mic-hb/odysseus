@@ -11,12 +11,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-_endpoint_resolver = sys.modules.get("src.endpoint_resolver")
-if _endpoint_resolver is not None and not getattr(_endpoint_resolver, "__file__", None):
-    # Other tests stub this module during collection. These helper tests need
-    # the real URL normalization helpers so Anthropic /v1 handling is covered.
-    sys.modules.pop("src.endpoint_resolver", None)
-    sys.modules.pop("routes.model_routes", None)
+from tests.helpers.import_state import clear_fake_endpoint_resolver_modules
+
+# Other tests stub this module during collection. These helper tests need
+# the real URL normalization helpers so Anthropic /v1 handling is covered.
+clear_fake_endpoint_resolver_modules()
 
 if "core.database" not in sys.modules:
     _core_db = types.ModuleType("core.database")
@@ -345,7 +344,7 @@ class TestClassifyEndpoint:
         def fake_head(*args, **kwargs):
             raise AssertionError("generic proxy health check should not use HEAD")
 
-        def fake_get(url, headers=None, timeout=None):
+        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             seen.append(("GET", url))
             request = httpx.Request("GET", url)
             return httpx.Response(200, request=request)
@@ -376,7 +375,7 @@ class TestSetupProbeSafety:
         monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
         monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
 
-        def fake_get(url, headers=None, timeout=None):
+        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             request = httpx.Request("GET", url)
             response = httpx.Response(401, request=request)
             raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
@@ -389,7 +388,7 @@ class TestSetupProbeSafety:
         monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
         monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
 
-        def fake_get(url, headers=None, timeout=None):
+        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             raise httpx.ConnectError("offline")
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
@@ -400,7 +399,7 @@ class TestSetupProbeSafety:
         monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
         monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
 
-        def fake_get(url, headers=None, timeout=None):
+        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             raise httpx.ConnectError("offline")
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
@@ -412,7 +411,7 @@ class TestSetupProbeSafety:
         monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
         seen = []
 
-        def fake_get(url, headers=None, timeout=None):
+        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             seen.append(url)
             request = httpx.Request("GET", url)
             response = httpx.Response(
@@ -432,7 +431,7 @@ class TestSetupProbeSafety:
         monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
         seen = []
 
-        def fake_get(url, headers=None, timeout=None):
+        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             seen.append((url, headers))
             request = httpx.Request("GET", url)
             response = httpx.Response(
@@ -451,7 +450,7 @@ class TestSetupProbeSafety:
         monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
         monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
 
-        def fake_get(url, headers=None, timeout=None):
+        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
             raise httpx.ConnectError("offline")
 
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
