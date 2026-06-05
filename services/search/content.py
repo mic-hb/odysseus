@@ -262,6 +262,17 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0) ->
     except httpx.RequestError as e:
         error_logger.error(f"NetworkError fetching {url} (attempt {retry_attempt}): {e}")
         return _empty_result(url, f"NetworkError: {e}")
+    except httpx.HTTPStatusError as e:
+        # Non-2xx (404, 401, 403, 5xx, …). A pasted URL is often an API
+        # endpoint, package registry, or other non-HTML resource that simply
+        # has no body to extract — treat that as a benign empty result so a
+        # bad link in a chat message doesn't 500 the whole request. The
+        # caller already gates on `success` to decide whether to inject
+        # content into the context preface.
+        error_logger.info(
+            f"HTTP {e.response.status_code} fetching {url} (attempt {retry_attempt}): {e}"
+        )
+        return _empty_result(url, f"HTTP {e.response.status_code}: {e.response.reason_phrase}")
     except RateLimitError as e:
         error_logger.error(str(e))
         return _empty_result(url, str(e))

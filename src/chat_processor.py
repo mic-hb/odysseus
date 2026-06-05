@@ -295,7 +295,15 @@ class ChatProcessor:
         skip_url_fetch = len(message) > 2000 or len(non_yt_urls) > 3
         if not skip_url_fetch:
             for url in non_yt_urls:
-                result = fetch_webpage_content(url)
+                # Defensive try/except: fetch_webpage_content returns
+                # ``success=False`` for transport/HTTP errors, but a bug
+                # in the fetcher (or an unexpected exception from a parser
+                # in a future refactor) must not 500 the whole chat.
+                try:
+                    result = fetch_webpage_content(url)
+                except Exception as e:
+                    logger.warning(f"Web page fetch failed for {url}: {e}")
+                    continue
                 if result.get('success'):
                     content = result.get('content', '')[:10000]
                     preface.append(untrusted_context_message(
