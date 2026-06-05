@@ -134,3 +134,80 @@ class TestBuildersLocalAndDockerEndpoints:
 
     def test_docker_internal_ollama_api_path_is_native_models(self):
         assert build_models_url("http://host.docker.internal:11434/api") == "http://host.docker.internal:11434/api/tags"
+
+
+class TestAnthropicCompatibleProxies:
+    """Anthropic-API-compatible proxies mounted on a non-Anthropic host
+    (e.g. MiniMax Token Plan at ``https://api.minimax.io/anthropic``) must
+    be detected as Anthropic-style so the chat/models URLs and the
+    ``x-api-key`` auth header route correctly. The OpenAI-style base
+    ``https://api.minimax.io/v1`` must keep working unchanged.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_dns(self, monkeypatch):
+        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda u: u)
+
+    def test_minimax_anthropic_path_detected_as_anthropic(self):
+        assert llm_core._detect_provider("https://api.minimax.io/anthropic") == "anthropic"
+
+    def test_minimax_openai_v1_stays_openai(self):
+        # The OpenAI-compatible base for MiniMax must NOT be misclassified
+        # as Anthropic — the two styles coexist on the same host.
+        assert llm_core._detect_provider("https://api.minimax.io/v1") == "openai"
+
+    def test_minimax_anthropic_chat_url_preserves_path(self):
+        assert build_chat_url("https://api.minimax.io/anthropic") == "https://api.minimax.io/anthropic/v1/messages"
+
+    def test_minimax_anthropic_models_url_preserves_path(self):
+        assert build_models_url("https://api.minimax.io/anthropic") == "https://api.minimax.io/anthropic/v1/models"
+
+    def test_minimax_anthropic_headers_use_x_api_key(self):
+        from src.endpoint_resolver import build_headers
+        h = build_headers("sk-test-1234", "https://api.minimax.io/anthropic")
+        assert h.get("x-api-key") == "sk-test-1234"
+        assert h.get("anthropic-version") == "2023-06-01"
+        # No Bearer header must leak in — Anthropic rejects unknown auth shapes.
+        assert "Authorization" not in h
+
+    def test_minimax_anthropic_v1_suffix_preserved(self):
+        # Users who paste the full URL with /v1 must still land on /v1/messages.
+        assert build_chat_url("https://api.minimax.io/anthropic/v1") == "https://api.minimax.io/anthropic/v1/messages"
+
+    def test_minimax_anthropic_compatible_path_helper(self):
+        assert llm_core._is_anthropic_compatible_path("https://api.minimax.io/anthropic")
+        assert llm_core._is_anthropic_compatible_path("https://api.minimax.io/anthropic/")
+        assert llm_core._is_anthropic_compatible_path("https://api.minimax.io/anthropic/v1")
+        # A hostname-as-path-segment (e.g. reverse proxy passthrough) must
+        # NOT match — first segment is ``anthropic.com``, not ``anthropic``.
+        assert not llm_core._is_anthropic_compatible_path("https://myproxy.internal/anthropic.com/v1")
+        # Plain host or unrelated path is not Anthropic-compatible.
+        assert not llm_core._is_anthropic_compatible_path("https://api.minimax.io/v1")
+        assert not llm_core._is_anthropic_compatible_path("https://api.minimax.io")
+        assert not llm_core._is_anthropic_compatible_path(None)
+        assert not llm_core._is_anthropic_compatible_path("")
+
+    def test_anthropic_compatible_url_helper(self):
+        assert llm_core._is_anthropic_compatible_url("https://api.anthropic.com/v1")
+        assert llm_core._is_anthropic_compatible_url("https://api.minimax.io/anthropic")
+        assert not llm_core._is_anthropic_compatible_url("https://api.minimax.io/v1")
+        assert not llm_core._is_anthropic_compatible_url(None)
+
+    def test_minimax_anthropic_skips_hardcoded_claude_list(self):
+        # list_model_ids must NOT return the hardcoded Claude list for an
+        # Anthropic-compatible proxy — that list would never contain the
+        # provider's actual model ids (e.g. MiniMax-M3). When the probe
+        # fails (no network in tests) the result is an empty list, not the
+        # Claude ids.
+        from src.llm_core import list_model_ids
+        result = list_model_ids("https://api.minimax.io/anthropic/v1/messages")
+        assert "claude-sonnet-4-5" not in result
+        assert "MiniMax-M3" not in result  # probe fails in tests; not asserting presence.
+
+    def test_native_anthropic_still_returns_claude_list(self):
+        # The native Anthropic host must keep using the hardcoded model
+        # list as before — the offline-friendly fallback for users who
+        # can't probe /v1/models.
+        from src.llm_core import list_model_ids
+        result = list_model_ids("https://api.anthropic.com/v1/messages")
+        assert "claude-sonnet-4-5" in result

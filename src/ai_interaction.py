@@ -69,7 +69,7 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
     """
     import httpx
     from src.database import SessionLocal, ModelEndpoint
-    from src.llm_core import _detect_provider, ANTHROPIC_MODELS
+    from src.llm_core import _detect_provider, ANTHROPIC_MODELS, _is_anthropic_compatible_path
     from src.auth_helpers import owner_filter
 
     spec = spec.strip()
@@ -100,8 +100,8 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
             provider = _detect_provider(base)
             headers = build_headers(ep.api_key, base)
 
-            if provider == "anthropic":
-                # Anthropic: match against hardcoded model list
+            if provider == "anthropic" and not _is_anthropic_compatible_path(base):
+                # Native Anthropic: match against hardcoded model list
                 matched = None
                 for am in ANTHROPIC_MODELS:
                     if model_name.lower() in am.lower() or am.lower() in model_name.lower():
@@ -1101,7 +1101,7 @@ async def do_list_models(content: str, session_id: Optional[str] = None, owner: 
     """
     import httpx
     from src.database import SessionLocal, ModelEndpoint
-    from src.llm_core import _detect_provider, ANTHROPIC_MODELS
+    from src.llm_core import _detect_provider, ANTHROPIC_MODELS, _is_anthropic_compatible_path
     from src.auth_helpers import owner_filter
 
     keyword = content.strip().lower() if content.strip() else None
@@ -1124,7 +1124,7 @@ async def do_list_models(content: str, session_id: Optional[str] = None, owner: 
             headers = build_headers(ep.api_key, base)
 
             model_ids = []
-            if provider == "anthropic":
+            if provider == "anthropic" and not _is_anthropic_compatible_path(base):
                 model_ids = list(ANTHROPIC_MODELS)
             else:
                 try:

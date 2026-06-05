@@ -12,7 +12,7 @@ from typing import Optional, Tuple, Dict
 from urllib.parse import urlparse, urlunparse
 
 from core.database import SessionLocal, ModelEndpoint
-from src.llm_core import _detect_provider, _host_match
+from src.llm_core import _detect_provider, _host_match, _is_anthropic_compatible_url
 
 logger = logging.getLogger(__name__)
 
@@ -143,9 +143,26 @@ def normalize_base(url: str) -> str:
 
 
 def _anthropic_api_root(base: str) -> str:
-    """Return Anthropic's API root, preserving /v1 for OpenAI-compatible APIs elsewhere."""
+    """Return the API root for an Anthropic or Anthropic-compatible base URL.
+
+    For ``https://api.anthropic.com/v1`` the trailing ``/v1`` is stripped so
+    that ``build_chat_url`` can append ``/v1/messages``. For Anthropic-style
+    proxies mounted on a non-``anthropic.com`` host (e.g. MiniMax Token Plan
+    at ``https://api.minimax.io/anthropic``) the existing path prefix is
+    preserved so the same builder produces
+    ``https://api.minimax.io/anthropic/v1/messages``.
+
+    Users who paste the full URL with the trailing ``/v1`` on either kind
+    of host land at the same place: the suffix is stripped uniformly so
+    we never end up with ``/v1/v1/messages``. A bare ``/v1`` on a host that
+    isn't Anthropic-style is left untouched — the function is only called
+    from Anthropic branches, but defending against misuse keeps the
+    helper self-contained.
+    """
     base = (base or "").strip().rstrip("/")
-    if _host_match(base, "anthropic.com") and base.endswith("/v1"):
+    if not _is_anthropic_compatible_url(base):
+        return base
+    if base.endswith("/v1"):
         return base[:-3].rstrip("/")
     return base
 

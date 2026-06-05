@@ -398,6 +398,34 @@ def _host_match(url: str, *domains: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
+def _is_anthropic_compatible_path(url: str) -> bool:
+    """True for non-Anthropic hosts that still expose an Anthropic-style API
+    behind an ``/anthropic`` path segment (e.g. MiniMax Token Plan at
+    ``https://api.minimax.io/anthropic``).
+
+    Only the *first* path segment is inspected, so a path like
+    ``/anthropic.com/v1`` (a hostname-as-path-segment, which a proxy might
+    proxy through) does NOT match — keeping the
+    ``test_anthropic_domain_in_path_is_openai`` invariant intact.
+    """
+    if not url:
+        return False
+    try:
+        path = (urlparse(url).path or "").rstrip("/")
+    except Exception:
+        return False
+    parts = [p for p in path.split("/") if p]
+    return bool(parts) and parts[0] == "anthropic"
+
+
+def _is_anthropic_compatible_url(url: str) -> bool:
+    """True for native Anthropic hosts and Anthropic-API-compatible proxies
+    mounted on a non-Anthropic host (e.g. MiniMax)."""
+    return bool(url) and (
+        _host_match(url, "anthropic.com") or _is_anthropic_compatible_path(url)
+    )
+
+
 def _detect_provider(url: str) -> str:
     """Detect the API provider from a configured endpoint URL.
 
@@ -409,7 +437,7 @@ def _detect_provider(url: str) -> str:
     """
     if _is_ollama_native_url(url):
         return "ollama"
-    if _host_match(url, "anthropic.com"):
+    if _is_anthropic_compatible_url(url):
         return "anthropic"
     if _host_match(url, "openrouter.ai"):
         return "openrouter"
@@ -926,7 +954,7 @@ def list_model_ids(base_chat_url: str, timeout: int = LLMConfig.DEFAULT_TIMEOUT,
     if cached:
         return cached
     provider = _detect_provider(base_chat_url)
-    if provider == "anthropic":
+    if provider == "anthropic" and not _is_anthropic_compatible_path(base_chat_url):
         return list(ANTHROPIC_MODELS)
     try:
         h = {}
@@ -934,6 +962,14 @@ def list_model_ids(base_chat_url: str, timeout: int = LLMConfig.DEFAULT_TIMEOUT,
             h.update(headers)
         if provider == "ollama":
             models_url = _ollama_api_root(base_chat_url) + "/tags"
+        elif provider == "anthropic":
+            # Anthropic-compatible proxies (e.g. MiniMax Token Plan at
+            # https://api.minimax.io/anthropic) expose /v1/models just like
+            # the native API — probe it instead of using the hardcoded
+            # Claude list, which would never contain their model ids
+            # (e.g. MiniMax-M3).
+            from src.endpoint_resolver import build_models_url, normalize_base
+            models_url = build_models_url(normalize_base(base_chat_url))
         else:
             models_url = base_chat_url.replace("/chat/completions", "/models")
         r = httpx.get(models_url, headers=h, timeout=timeout)
