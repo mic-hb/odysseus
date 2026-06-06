@@ -8,6 +8,14 @@ import { clearDockSide } from './modalSnap.js';
 import { sortModelIds } from './modelSort.js';
 import { isAltGrEvent } from './platform.js';
 
+// Same-origin as the page — no base path prefix needed (e.g. when the
+// app is reverse-proxied at ``/odysseus``). Matches the convention used
+// by the other self-contained modules (calendar.js, emailInbox.js,
+// chatMaxTokens.js, …). Needed because the Settings module is loaded
+// directly by index.html (no ``init(apiBase)`` indirection like chat.js
+// / document.js have), so it can't read a value injected at runtime.
+const API_BASE = window.location.origin;
+
 let initialized = false;
 let modalEl = null;
 
@@ -811,22 +819,51 @@ async function initVisionSettings() {
     var lower = String(mid || '').toLowerCase();
     return !_vlExclude.some(function(kw) { return lower.includes(kw); });
   }
-  try {
-    const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
-    const modelsData = await modelsRes.json();
-    const visionModels = [];
-    (modelsData.items || []).forEach(item => {
-      if (item.offline) return;
-      (item.models || []).forEach(mid => {
-        if (_isVisionModel(mid)) {
-          visionModels.push(mid);
-        }
+
+  // Re-populate the vision <select> from /api/models. Called once on
+  // init and again whenever the endpoint list changes (a new endpoint
+  // was added in the admin panel) — the chat list and the fallback
+  // widget both refresh that way, but the primary vision <select>
+  // historically didn't, so adding MiniMax (or any other endpoint)
+  // after the settings panel was first opened left Vision showing
+  // only the "Auto-detect" placeholder.
+  async function _refreshVisionList() {
+    if (!vlSel) return;
+    // Remember the user's current pick so we can restore it if it
+    // still exists in the refreshed list.
+    const previous = vlSel.value;
+    while (vlSel.options.length > 1) vlSel.remove(1);
+    try {
+      const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
+      if (!modelsRes.ok) throw new Error('HTTP ' + modelsRes.status);
+      const modelsData = await modelsRes.json();
+      const visionModels = [];
+      (modelsData.items || []).forEach(item => {
+        if (item.offline) return;
+        (item.models || []).forEach(mid => {
+          if (_isVisionModel(mid)) {
+            visionModels.push(mid);
+          }
+        });
       });
-    });
-    sortModelIds(visionModels).forEach(mid => {
-      var opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; vlSel.appendChild(opt);
-    });
-  } catch (e) { console.warn('Failed to load models for vision settings', e); }
+      sortModelIds(visionModels).forEach(mid => {
+        const opt = document.createElement('option');
+        opt.value = mid;
+        opt.textContent = mid;
+        vlSel.appendChild(opt);
+      });
+      if (previous && Array.from(vlSel.options).some(o => o.value === previous)) {
+        vlSel.value = previous;
+      } else if (visionModels.length === 0 && msg) {
+        msg.textContent = 'No vision-capable models found. Add a model endpoint or check that one of your models isn’t in the excluded list (audio/realtime/tts/dall-e/embedding/search/whisper).';
+        msg.style.color = 'color-mix(in srgb, var(--fg) 45%, transparent)';
+      }
+    } catch (e) {
+      console.warn('Failed to load models for vision settings', e);
+      if (msg) { msg.textContent = 'Could not load models: ' + e.message; msg.style.color = 'var(--red)'; }
+    }
+  }
+  await _refreshVisionList();
   // Also pull the raw endpoint list so the fallback widget can resolve
   // endpoint-id → models the same way the other cards do.
   try {
@@ -871,6 +908,14 @@ async function initVisionSettings() {
 
   _registerAiEndpointRefresh(function(endpoints) {
     _visionEndpoints = endpoints;
+    // Re-populate the primary vision <select> as well as the fallback
+    // widget — adding a new endpoint (e.g. MiniMax with an M3
+    // model) used to leave Vision showing only "Auto-detect" until
+    // the page was hard-reloaded, because this callback only refreshed
+    // the fallback list and the main select was populated exactly
+    // once in initVisionSettings(). _refreshVisionList() is idempotent
+    // and preserves the user's current pick.
+    _refreshVisionList();
     if (visionFallbackWidget && visionFallbackWidget.refresh) visionFallbackWidget.refresh();
   });
 }
@@ -5185,6 +5230,11 @@ export function close() {
 }
 
 const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
+// Expose on window so the admin panel (and the in-page tests in
+// tests/mobile_ui/) can call ``window.settingsModule.refreshAiModelEndpoints()``
+// after adding a new endpoint. Same pattern as chatModule /
+// adminModule — see calendar.js:790-794 for the consumer.
+if (typeof window !== 'undefined') window.settingsModule = settingsModule;
 
 
 export default settingsModule;
